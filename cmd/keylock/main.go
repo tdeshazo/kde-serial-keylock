@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -65,6 +66,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("locker: %v", err)
 	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	auth := token.Authenticator{
 		Cfg: token.Config{
 			Port:    cfg.Serial.Port,
@@ -75,13 +80,13 @@ func main() {
 			Debug:   *authDebug,
 		},
 		Secret: []byte(secret),
+		TimerWarningHandler: func(warning token.TimerWarning) {
+			go notifyTimerWarning(ctx, warning)
+		},
 	}
 	if *authDebug {
 		log.Printf("auth debug enabled: challenge nonces and expected per-challenge HMACs will be logged")
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	if *tokenDiag {
 		checkTokenDiagnostic(ctx, auth)
@@ -128,6 +133,27 @@ func checkTokenDiagnostic(ctx context.Context, auth token.Authenticator) {
 	if !diag.KeyHashMatches() || !diag.TestMACMatches() {
 		os.Exit(2)
 	}
+}
+
+func notifyTimerWarning(ctx context.Context, warning token.TimerWarning) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(
+		ctx,
+		"notify-send",
+		"--app-name=Session Monitor",
+		"--icon=dialog-information",
+		"--urgency=normal",
+		"--expire-time=5000",
+		"KDE session state",
+		"Session locking in 5 minutes!",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("timer warning notification failed: port=%s remaining=%d: %v: %s", warning.Port, warning.Remaining, err, string(out))
+		return
+	}
+	log.Printf("timer warning notification sent: port=%s remaining=%d", warning.Port, warning.Remaining)
 }
 
 func checkOnce(ctx context.Context, auth token.Authenticator, l locker.Locker, unlock bool) {

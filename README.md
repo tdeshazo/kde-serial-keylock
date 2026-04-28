@@ -90,6 +90,25 @@ and stops answering normal `KEYLOCK/1` challenges with a valid HMAC. With the
 current daemon, that invalid authentication is the lock signal: the next poll
 will lock the session without any daemon changes.
 
+When a running timer crosses the 5-minute threshold, the token writes:
+
+```text
+KEYLOCK-WARNING/1 remaining=300
+```
+
+The daemon treats this as an asynchronous serial event and shows a desktop
+notification with `notify-send`:
+
+```bash
+notify-send \
+  --app-name="Session Monitor" \
+  --icon=dialog-information \
+  --urgency=normal \
+  --expire-time=5000 \
+  "KDE session state" \
+  "Session locking in 5 minutes!"
+```
+
 The firmware stores timer state in `microcontroller.nvm` when the board exposes
 enough NVM bytes. This avoids the common CircuitPython issue where the CIRCUITPY
 filesystem is writable by the host but read-only to firmware. If NVM is not
@@ -115,6 +134,7 @@ count down merely because it is powered; time elapses only after the daemon send
 - `stty` for serial-port configuration.
 - `qdbus6`, `qdbus`, or `dbus-send` for KDE locking.
 - `loginctl` for logind lock/unlock requests.
+- `notify-send` for timer warning desktop notifications.
 - Permission to read/write the serial device. On many distros this means adding your user to `dialout`, `uucp`, or a distro-specific serial group, then logging out and back in.
 
 ## Build

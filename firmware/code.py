@@ -25,6 +25,7 @@ ENABLE_DIAGNOSTICS = False
 TIMER_STATE_PATH = "/timer_state.json"
 TIMER_CHECKPOINT_SECONDS = 60
 TIMER_SIGNAL_INTERVAL_SECONDS = 5
+TIMER_WARNING_SECONDS = 300
 NVM_MAGIC = b"KLT1"
 NVM_RECORD_LEN = 10
 STATE_CODES = {
@@ -224,6 +225,8 @@ timer_state = load_timer_state()
 last_tick = monotonic_seconds()
 last_checkpoint = last_tick
 last_expired_signal = 0
+timer_warning_sent = timer_state["remaining"] <= TIMER_WARNING_SECONDS
+timer_warning_pending = False
 last_persist_backend = persist_timer_state()
 last_persist_ok = last_persist_backend != "none"
 serial_buffer = ""
@@ -233,15 +236,34 @@ def timer_status():
     return timer_state["state"]
 
 
+def write_timer_warning():
+    write_line("KEYLOCK-WARNING/1 remaining={}".format(timer_state["remaining"]))
+
+
+def write_pending_timer_warning():
+    global timer_warning_pending
+    if timer_warning_pending:
+        write_timer_warning()
+        timer_warning_pending = False
+
+
 def update_timer():
-    global last_tick, last_checkpoint, last_expired_signal
+    global last_tick, last_checkpoint, last_expired_signal, timer_warning_sent, timer_warning_pending
 
     now = monotonic_seconds()
     elapsed = now - last_tick
     last_tick = now
 
     if timer_state["state"] == "running" and elapsed > 0:
+        previous_remaining = timer_state["remaining"]
         timer_state["remaining"] = max(0, timer_state["remaining"] - elapsed)
+        if (
+            not timer_warning_sent
+            and previous_remaining > TIMER_WARNING_SECONDS
+            and 0 < timer_state["remaining"] <= TIMER_WARNING_SECONDS
+        ):
+            timer_warning_pending = True
+            timer_warning_sent = True
         if timer_state["remaining"] == 0:
             timer_state["state"] = "expired"
             save_timer_state()
@@ -257,20 +279,27 @@ def update_timer():
 
 
 def set_timer(seconds):
-    global last_tick, last_checkpoint
+    global last_tick, last_checkpoint, timer_warning_sent, timer_warning_pending
     seconds = max(0, int(seconds))
     timer_state["remaining"] = seconds
     timer_state["state"] = "paused" if seconds > 0 else "unset"
+    timer_warning_sent = seconds <= TIMER_WARNING_SECONDS
+    timer_warning_pending = False
     last_tick = monotonic_seconds()
     last_checkpoint = last_tick
     save_timer_state()
 
 
 def add_timer(seconds):
-    global last_tick, last_checkpoint
+    global last_tick, last_checkpoint, timer_warning_sent, timer_warning_pending
     update_timer()
     seconds = max(0, int(seconds))
     timer_state["remaining"] = timer_state["remaining"] + seconds
+    timer_warning_pending = False
+    if timer_state["remaining"] > TIMER_WARNING_SECONDS:
+        timer_warning_sent = False
+    else:
+        timer_warning_sent = True
     if timer_state["remaining"] > 0 and timer_state["state"] in ("unset", "expired"):
         timer_state["state"] = "paused"
         last_tick = monotonic_seconds()
@@ -294,8 +323,11 @@ def resume_timer():
 
 
 def clear_timer():
+    global timer_warning_sent, timer_warning_pending
     timer_state["remaining"] = 0
     timer_state["state"] = "unset"
+    timer_warning_sent = True
+    timer_warning_pending = False
     save_timer_state()
 
 
@@ -375,6 +407,8 @@ def handle_line(line):
     parts = line.strip().split()
     if not parts:
         return
+
+    write_pending_timer_warning()
 
     if len(parts) == 2 and parts[0] == "KEYLOCK/1":
         if timer_state["state"] == "expired":

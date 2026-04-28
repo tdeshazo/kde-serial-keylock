@@ -23,6 +23,7 @@ import (
 const (
 	diagnosticCommand = "KEYLOCK-DIAG/1"
 	timerCommand      = "KEYLOCK-TIMER/1"
+	timerWarning      = "KEYLOCK-WARNING/1"
 	testVectorMessage = "KEYLOCK-TEST-NONCE"
 )
 
@@ -44,8 +45,9 @@ type Config struct {
 }
 
 type Authenticator struct {
-	Cfg    Config
-	Secret []byte
+	Cfg                 Config
+	Secret              []byte
+	TimerWarningHandler func(TimerWarning)
 }
 
 type PortInfo struct {
@@ -69,6 +71,12 @@ type TimerStatus struct {
 	State     string
 	Remaining int
 	Persist   string
+	RawLine   string
+}
+
+type TimerWarning struct {
+	Port      string
+	Remaining int
 	RawLine   string
 }
 
@@ -299,24 +307,37 @@ func (a Authenticator) challengePort(ctx context.Context, name string) error {
 	}
 	a.debugf("auth %s: challenge written bytes=%q", name, string(challenge))
 
-	line, err := readLine(ctx, f, a.Cfg.Timeout)
-	if err != nil {
-		return fmt.Errorf("read response from %s: %w", name, err)
-	}
-	line = strings.TrimSpace(line)
-	result := verifyResponse(a.Secret, nonceHex, line)
-	if a.Cfg.Debug {
-		a.debugf("auth %s: response line=%q", name, line)
-		a.debugf("auth %s: response parsed protocol=%q mac=%q reason=%q", name, result.protocol, result.macHex, result.reason)
-		a.debugf("auth %s: expected mac over ascii nonce=%s", name, result.expectedASCIIHex)
-		if result.expectedRawHex != "" {
-			a.debugf("auth %s: expected mac over raw nonce bytes=%s", name, result.expectedRawHex)
+	deadline := time.Now().Add(a.Cfg.Timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("read response from %s: %w", name, errTimeout)
 		}
+		line, err := readLine(ctx, f, remaining)
+		if err != nil {
+			return fmt.Errorf("read response from %s: %w", name, err)
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if a.handleAsyncLine(name, line) {
+			continue
+		}
+		result := verifyResponse(a.Secret, nonceHex, line)
+		if a.Cfg.Debug {
+			a.debugf("auth %s: response line=%q", name, line)
+			a.debugf("auth %s: response parsed protocol=%q mac=%q reason=%q", name, result.protocol, result.macHex, result.reason)
+			a.debugf("auth %s: expected mac over ascii nonce=%s", name, result.expectedASCIIHex)
+			if result.expectedRawHex != "" {
+				a.debugf("auth %s: expected mac over raw nonce bytes=%s", name, result.expectedRawHex)
+			}
+		}
+		if result.ok {
+			return nil
+		}
+		return fmt.Errorf("bad token response from %s: %s", name, result.reason)
 	}
-	if result.ok {
-		return nil
-	}
-	return fmt.Errorf("bad token response from %s: %s", name, result.reason)
 }
 
 func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnostic, error) {
@@ -358,6 +379,9 @@ func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnosti
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		if a.handleAsyncLine(name, line) {
 			continue
 		}
 		diag.RawLines = append(diag.RawLines, line)
@@ -418,6 +442,9 @@ func (a Authenticator) readTimerStatusPort(ctx context.Context, name string) (Ti
 		}
 		response = strings.TrimSpace(response)
 		a.debugf("timer %s: status response line=%q", name, response)
+		if a.handleAsyncLine(name, response) {
+			continue
+		}
 		if strings.Contains(response, "ERR ") {
 			return TimerStatus{}, fmt.Errorf("timer status rejected by %s: %s", name, response)
 		}
@@ -466,6 +493,9 @@ func (a Authenticator) sendTimerCommandPort(ctx context.Context, name string, co
 		}
 		response = strings.TrimSpace(response)
 		a.debugf("timer %s: response line=%q", name, response)
+		if a.handleAsyncLine(name, response) {
+			continue
+		}
 		if strings.Contains(response, "ERR ") {
 			rejection = response
 			continue
@@ -485,6 +515,18 @@ func (a Authenticator) debugf(format string, args ...any) {
 	if a.Cfg.Debug {
 		log.Printf(format, args...)
 	}
+}
+
+func (a Authenticator) handleAsyncLine(port string, line string) bool {
+	warning, ok := parseTimerWarningLine(port, line)
+	if !ok {
+		return false
+	}
+	a.debugf("timer %s: warning line=%q", port, line)
+	if a.TimerWarningHandler != nil {
+		a.TimerWarningHandler(warning)
+	}
+	return true
 }
 
 func stripBeforeKnownDiagnostic(line string) string {
@@ -537,6 +579,34 @@ func parseTimerStatusLine(port string, line string) (TimerStatus, bool) {
 		return TimerStatus{}, false
 	}
 	return status, true
+}
+
+func parseTimerWarningLine(port string, line string) (TimerWarning, bool) {
+	if idx := strings.Index(line, timerWarning); idx >= 0 {
+		line = line[idx:]
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 1 || fields[0] != timerWarning {
+		return TimerWarning{}, false
+	}
+
+	warning := TimerWarning{Port: port, RawLine: line}
+	for _, field := range fields[1:] {
+		if n, err := strconv.Atoi(field); err == nil {
+			warning.Remaining = n
+			continue
+		}
+		key, value, ok := strings.Cut(field, "=")
+		if !ok || key != "remaining" {
+			continue
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return TimerWarning{}, false
+		}
+		warning.Remaining = n
+	}
+	return warning, true
 }
 
 func configureTTY(ctx context.Context, name string, baud int) error {
