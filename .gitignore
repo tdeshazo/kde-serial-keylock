@@ -29,6 +29,7 @@ go.work.sum
 .env
 
 *.mpy
+__pycache__/
 
 # Editor/IDE
 # .idea/
