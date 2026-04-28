@@ -20,6 +20,94 @@ HMAC-SHA256 <hex(hmac_sha256(secret, nonce_hex))>
 
 The secret is never sent over the serial line.
 
+## Token timer protocol
+
+The firmware also accepts timer commands over the same serial port. Time-limit
+setup is intended to be sent by a separate provisioning tool. While running, the
+keylock daemon sends the `LOCKED` and `UNLOCKED` events when the desktop lock
+state changes.
+
+```text
+KEYLOCK-TIMER/1 SET <seconds> <hmac>
+KEYLOCK-TIMER/1 ADD <seconds> <hmac>
+KEYLOCK-TIMER/1 PAUSE <hmac>
+KEYLOCK-TIMER/1 RESUME <hmac>
+KEYLOCK-TIMER/1 LOCKED <hmac>
+KEYLOCK-TIMER/1 UNLOCKED <hmac>
+KEYLOCK-TIMER/1 STATUS
+KEYLOCK-TIMER/1 CLEAR <hmac>
+```
+
+`SET` stores a new remaining-time limit in a paused state. `ADD` increments the
+remaining time while preserving the current state where possible. `PAUSE` and
+`LOCKED` persist the current remaining time to flash. `RESUME` and `UNLOCKED`
+start or continue counting down. `STATUS` reports the current state and
+remaining seconds. `CLEAR` removes the active timer.
+
+The token owns the timer state machine:
+
+```text
+unset --SET/ADD--> paused --UNLOCKED/RESUME--> running --LOCKED/PAUSE--> paused --elapsed--> expired
+running --ADD--> running
+paused --ADD--> paused
+expired --ADD--> paused
+running --CLEAR--> unset
+paused --CLEAR--> unset
+expired --CLEAR--> unset
+```
+
+Mutating timer commands are authenticated. `<hmac>` is:
+
+```text
+hex(hmac_sha256(secret, "<command without trailing hmac>"))
+```
+
+This keeps unauthenticated serial writers from changing timer state. It does not
+make provisioning commands replay-proof: someone who can capture a valid `SET`
+or `CLEAR` command on the serial link can replay it later. Treat the serial path
+used for provisioning as trusted, or add a separate challenge/nonce flow before
+using this across an untrusted transport.
+
+For example, for:
+
+```text
+KEYLOCK-TIMER/1 SET 3600
+```
+
+the final serial line must be:
+
+```text
+KEYLOCK-TIMER/1 SET 3600 <hex(hmac_sha256(secret, "KEYLOCK-TIMER/1 SET 3600"))>
+```
+
+When the timer expires, the token writes:
+
+```text
+KEYLOCK-EXPIRED/1
+```
+
+and stops answering normal `KEYLOCK/1` challenges with a valid HMAC. With the
+current daemon, that invalid authentication is the lock signal: the next poll
+will lock the session without any daemon changes.
+
+The firmware stores timer state in `microcontroller.nvm` when the board exposes
+enough NVM bytes. This avoids the common CircuitPython issue where the CIRCUITPY
+filesystem is writable by the host but read-only to firmware. If NVM is not
+available, the firmware falls back to `/timer_state.json` on the board
+filesystem and creates it automatically on first boot when possible. It writes
+on boot, `SET`, `PAUSE`/`LOCKED`, `RESUME`/`UNLOCKED`, `CLEAR`, expiration, and
+at most once every 60 seconds while running to limit flash wear.
+If a command reports `persist=failed`, the timer changed in RAM and `STATUS` can
+show the new value, but the value will not survive a board reset. `STATUS`
+includes `store=nvm`, `store=file`, or `store=none` to show which persistence
+backend is in use.
+
+While running as a daemon, keylock queries the desktop lock state and sends
+authenticated `LOCKED` or `UNLOCKED` timer commands when that state changes. It
+also sends `PAUSE` during daemon shutdown. A provisioned key therefore does not
+count down merely because it is powered; time elapses only after the daemon sends
+`UNLOCKED` or another authenticated `RESUME`.
+
 ## Requirements
 
 - Linux with KDE Plasma.
@@ -33,6 +121,7 @@ The secret is never sent over the serial line.
 
 ```bash
 go build -o keylock ./cmd/keylock
+go build -o settimer ./cmd/settimer
 ```
 
 ## Configure
@@ -67,6 +156,30 @@ List candidate serial devices:
 
 ```bash
 ./keylock -list-ports
+```
+
+Read the timer state from a present key:
+
+```bash
+./settimer -config ~/.config/keylock/config.json status
+```
+
+Set the key timer:
+
+```bash
+set -a
+. ~/.config/keylock/secret.env
+set +a
+./settimer -config ~/.config/keylock/config.json set 4h
+```
+
+Add time to the current timer without manually calculating the remaining time:
+
+```bash
+set -a
+. ~/.config/keylock/secret.env
+set +a
+./settimer -config ~/.config/keylock/config.json add 30m
 ```
 
 Check once:

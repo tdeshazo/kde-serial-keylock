@@ -22,6 +22,7 @@ import (
 
 const (
 	diagnosticCommand = "KEYLOCK-DIAG/1"
+	timerCommand      = "KEYLOCK-TIMER/1"
 	testVectorMessage = "KEYLOCK-TEST-NONCE"
 )
 
@@ -61,6 +62,14 @@ type Diagnostic struct {
 	TestMAC         string
 	ExpectedTestMAC string
 	RawLines        []string
+}
+
+type TimerStatus struct {
+	Port      string
+	State     string
+	Remaining int
+	Persist   string
+	RawLine   string
 }
 
 func (d Diagnostic) KeyHashMatches() bool {
@@ -154,6 +163,92 @@ func (a Authenticator) Diagnose(ctx context.Context) (Diagnostic, error) {
 		lastErr = errors.New("no serial ports attempted")
 	}
 	return Diagnostic{}, lastErr
+}
+
+func (a Authenticator) SendTimerLockState(ctx context.Context, locked bool) (TimerStatus, error) {
+	if len(a.Secret) == 0 {
+		return TimerStatus{}, errors.New("empty secret")
+	}
+	command := "UNLOCKED"
+	if locked {
+		command = "LOCKED"
+	}
+	return a.sendTimerCommand(ctx, command)
+}
+
+func (a Authenticator) PauseTimer(ctx context.Context) (TimerStatus, error) {
+	if len(a.Secret) == 0 {
+		return TimerStatus{}, errors.New("empty secret")
+	}
+	return a.sendTimerCommand(ctx, "PAUSE")
+}
+
+func (a Authenticator) TimerStatus(ctx context.Context) (TimerStatus, error) {
+	ports, err := a.candidatePorts()
+	if err != nil {
+		return TimerStatus{}, err
+	}
+	if len(ports) == 0 {
+		return TimerStatus{}, errors.New("no matching serial ports")
+	}
+
+	var lastErr error
+	for _, name := range ports {
+		status, err := a.readTimerStatusPort(ctx, name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return status, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no serial ports attempted")
+	}
+	return TimerStatus{}, lastErr
+}
+
+func (a Authenticator) SetTimer(ctx context.Context, seconds int) (TimerStatus, error) {
+	if len(a.Secret) == 0 {
+		return TimerStatus{}, errors.New("empty secret")
+	}
+	if seconds < 0 {
+		return TimerStatus{}, errors.New("timer seconds cannot be negative")
+	}
+	return a.sendTimerCommand(ctx, "SET", strconv.Itoa(seconds))
+}
+
+func (a Authenticator) AddTimer(ctx context.Context, seconds int) (TimerStatus, error) {
+	if len(a.Secret) == 0 {
+		return TimerStatus{}, errors.New("empty secret")
+	}
+	if seconds < 0 {
+		return TimerStatus{}, errors.New("added seconds cannot be negative")
+	}
+	return a.sendTimerCommand(ctx, "ADD", strconv.Itoa(seconds))
+}
+
+func (a Authenticator) sendTimerCommand(ctx context.Context, commandParts ...string) (TimerStatus, error) {
+	ports, err := a.candidatePorts()
+	if err != nil {
+		return TimerStatus{}, err
+	}
+	if len(ports) == 0 {
+		return TimerStatus{}, errors.New("no matching serial ports")
+	}
+
+	var lastErr error
+	for _, name := range ports {
+		status, err := a.sendTimerCommandPort(ctx, name, commandParts...)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return status, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no serial ports attempted")
+	}
+	return TimerStatus{}, lastErr
 }
 
 func (a Authenticator) candidatePorts() ([]string, error) {
@@ -289,6 +384,103 @@ func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnosti
 	return diag, fmt.Errorf("incomplete diagnostic response from %s", name)
 }
 
+func (a Authenticator) readTimerStatusPort(ctx context.Context, name string) (TimerStatus, error) {
+	a.debugf("timer %s: configuring tty baud=%d timeout=%s", name, a.Cfg.Baud, a.Cfg.Timeout)
+	if err := configureTTY(ctx, name, a.Cfg.Baud); err != nil {
+		return TimerStatus{}, err
+	}
+
+	fd, err := syscall.Open(name, syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return TimerStatus{}, fmt.Errorf("open %s: %w", name, err)
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer f.Close()
+
+	query := []byte(timerCommand + " STATUS\n")
+	if err := writeAll(ctx, f, query, a.Cfg.Timeout); err != nil {
+		return TimerStatus{}, fmt.Errorf("write timer status to %s: %w", name, err)
+	}
+	a.debugf("timer %s: status query written bytes=%q", name, string(query))
+
+	deadline := time.Now().Add(a.Cfg.Timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		response, err := readLine(ctx, f, remaining)
+		if err != nil {
+			if errors.Is(err, errTimeout) {
+				break
+			}
+			return TimerStatus{}, fmt.Errorf("read timer status from %s: %w", name, err)
+		}
+		response = strings.TrimSpace(response)
+		a.debugf("timer %s: status response line=%q", name, response)
+		if strings.Contains(response, "ERR ") {
+			return TimerStatus{}, fmt.Errorf("timer status rejected by %s: %s", name, response)
+		}
+		parsed, ok := parseTimerStatusLine(name, response)
+		if ok {
+			return parsed, nil
+		}
+	}
+	return TimerStatus{}, fmt.Errorf("no timer status response from %s", name)
+}
+
+func (a Authenticator) sendTimerCommandPort(ctx context.Context, name string, commandParts ...string) (TimerStatus, error) {
+	a.debugf("timer %s: configuring tty baud=%d timeout=%s", name, a.Cfg.Baud, a.Cfg.Timeout)
+	if err := configureTTY(ctx, name, a.Cfg.Baud); err != nil {
+		return TimerStatus{}, err
+	}
+
+	fd, err := syscall.Open(name, syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return TimerStatus{}, fmt.Errorf("open %s: %w", name, err)
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer f.Close()
+
+	unsigned := strings.Join(append([]string{timerCommand}, commandParts...), " ")
+	mac := hmacSHA256Hex(a.Secret, []byte(unsigned))
+	line := unsigned + " " + mac + "\n"
+	if err := writeAll(ctx, f, []byte(line), a.Cfg.Timeout); err != nil {
+		return TimerStatus{}, fmt.Errorf("write timer command to %s: %w", name, err)
+	}
+	a.debugf("timer %s: command written bytes=%q", name, line)
+
+	deadline := time.Now().Add(a.Cfg.Timeout)
+	var rejection string
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		response, err := readLine(ctx, f, remaining)
+		if err != nil {
+			if errors.Is(err, errTimeout) {
+				break
+			}
+			return TimerStatus{}, fmt.Errorf("read timer command response from %s: %w", name, err)
+		}
+		response = strings.TrimSpace(response)
+		a.debugf("timer %s: response line=%q", name, response)
+		if strings.Contains(response, "ERR ") {
+			rejection = response
+			continue
+		}
+		parsed, ok := parseTimerStatusLine(name, response)
+		if ok {
+			return parsed, nil
+		}
+	}
+	if rejection != "" {
+		return TimerStatus{}, fmt.Errorf("timer command rejected by %s: %s", name, rejection)
+	}
+	return TimerStatus{}, fmt.Errorf("no timer command acknowledgement from %s", name)
+}
+
 func (a Authenticator) debugf(format string, args ...any) {
 	if a.Cfg.Debug {
 		log.Printf(format, args...)
@@ -302,6 +494,49 @@ func stripBeforeKnownDiagnostic(line string) string {
 		}
 	}
 	return line
+}
+
+func parseTimerStatusLine(port string, line string) (TimerStatus, bool) {
+	for _, marker := range []string{"OK TIMER/1", "TIMER/1"} {
+		if idx := strings.Index(line, marker); idx >= 0 {
+			line = line[idx:]
+			break
+		}
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return TimerStatus{}, false
+	}
+	if fields[0] == "OK" {
+		fields = fields[1:]
+	}
+	if len(fields) < 3 || fields[0] != "TIMER/1" {
+		return TimerStatus{}, false
+	}
+
+	status := TimerStatus{Port: port, RawLine: line}
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "state":
+			status.State = value
+		case "remaining":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return TimerStatus{}, false
+			}
+			status.Remaining = n
+		case "persist":
+			status.Persist = value
+		}
+	}
+	if status.State == "" {
+		return TimerStatus{}, false
+	}
+	return status, true
 }
 
 func configureTTY(ctx context.Context, name string, baud int) error {
