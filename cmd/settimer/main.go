@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -30,6 +31,7 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	configureLogging(*debug)
 
 	args := flag.Args()
 	command := "status"
@@ -111,6 +113,15 @@ func main() {
 	if status.Persist == "failed" {
 		fmt.Fprintln(os.Stderr, "warning: timer state changed in RAM, but the key could not persist it to flash")
 	}
+}
+
+func configureLogging(debug bool) {
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(handler))
 }
 
 func parseSeconds(s string) (int, error) {

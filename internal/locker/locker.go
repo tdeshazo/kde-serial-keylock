@@ -20,12 +20,10 @@ type DryRun struct {
 }
 
 func (d DryRun) Lock(ctx context.Context) error {
-	fmt.Println("dry-run: would lock session")
 	return nil
 }
 
 func (d DryRun) Unlock(ctx context.Context) error {
-	fmt.Println("dry-run: would request session unlock")
 	return nil
 }
 

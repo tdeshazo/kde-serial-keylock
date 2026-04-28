@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,7 +124,7 @@ func (a Authenticator) Authenticate(ctx context.Context) (string, error) {
 	if len(ports) == 0 {
 		return "", errors.New("no matching serial ports")
 	}
-	a.debugf("auth candidates: %s", strings.Join(ports, ", "))
+	a.debug("auth candidates selected", "ports", ports)
 
 	var lastErr error
 	for _, name := range ports {
@@ -156,7 +156,7 @@ func (a Authenticator) Diagnose(ctx context.Context) (Diagnostic, error) {
 	if len(ports) == 0 {
 		return Diagnostic{}, errors.New("no matching serial ports")
 	}
-	a.debugf("auth diagnostic candidates: %s", strings.Join(ports, ", "))
+	a.debug("auth diagnostic candidates selected", "ports", ports)
 
 	var lastErr error
 	for _, name := range ports {
@@ -283,7 +283,7 @@ func (a Authenticator) candidatePorts() ([]string, error) {
 }
 
 func (a Authenticator) challengePort(ctx context.Context, name string) error {
-	a.debugf("auth %s: configuring tty baud=%d timeout=%s", name, a.Cfg.Baud, a.Cfg.Timeout)
+	a.debug("serial tty configure", "operation", "auth", "port", name, "baud", a.Cfg.Baud, "timeout", a.Cfg.Timeout)
 	if err := configureTTY(ctx, name, a.Cfg.Baud); err != nil {
 		return err
 	}
@@ -301,11 +301,11 @@ func (a Authenticator) challengePort(ctx context.Context, name string) error {
 	}
 	nonceHex := hex.EncodeToString(nonce)
 	challenge := []byte("KEYLOCK/1 " + nonceHex + "\n")
-	a.debugf("auth %s: challenge nonce_hex=%s", name, nonceHex)
+	a.debug("auth challenge generated", "port", name, "nonce_hex", nonceHex)
 	if err := writeAll(ctx, f, challenge, a.Cfg.Timeout); err != nil {
 		return fmt.Errorf("write challenge to %s: %w", name, err)
 	}
-	a.debugf("auth %s: challenge written bytes=%q", name, string(challenge))
+	a.debug("auth challenge written", "port", name, "bytes", string(challenge))
 
 	deadline := time.Now().Add(a.Cfg.Timeout)
 	for {
@@ -326,12 +326,16 @@ func (a Authenticator) challengePort(ctx context.Context, name string) error {
 		}
 		result := verifyResponse(a.Secret, nonceHex, line)
 		if a.Cfg.Debug {
-			a.debugf("auth %s: response line=%q", name, line)
-			a.debugf("auth %s: response parsed protocol=%q mac=%q reason=%q", name, result.protocol, result.macHex, result.reason)
-			a.debugf("auth %s: expected mac over ascii nonce=%s", name, result.expectedASCIIHex)
-			if result.expectedRawHex != "" {
-				a.debugf("auth %s: expected mac over raw nonce bytes=%s", name, result.expectedRawHex)
-			}
+			a.debug(
+				"auth response verified",
+				"port", name,
+				"line", line,
+				"protocol", result.protocol,
+				"mac", result.macHex,
+				"reason", result.reason,
+				"expected_ascii_hmac", result.expectedASCIIHex,
+				"expected_raw_hmac", result.expectedRawHex,
+			)
 		}
 		if result.ok {
 			return nil
@@ -341,7 +345,7 @@ func (a Authenticator) challengePort(ctx context.Context, name string) error {
 }
 
 func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnostic, error) {
-	a.debugf("auth diagnostic %s: configuring tty baud=%d timeout=%s", name, a.Cfg.Baud, a.Cfg.Timeout)
+	a.debug("serial tty configure", "operation", "diagnostic", "port", name, "baud", a.Cfg.Baud, "timeout", a.Cfg.Timeout)
 	if err := configureTTY(ctx, name, a.Cfg.Baud); err != nil {
 		return Diagnostic{}, err
 	}
@@ -357,7 +361,7 @@ func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnosti
 	if err := writeAll(ctx, f, command, a.Cfg.Timeout); err != nil {
 		return Diagnostic{}, fmt.Errorf("write diagnostic command to %s: %w", name, err)
 	}
-	a.debugf("auth diagnostic %s: command written bytes=%q", name, string(command))
+	a.debug("auth diagnostic command written", "port", name, "bytes", string(command))
 
 	diag := Diagnostic{
 		Port:            name,
@@ -385,7 +389,7 @@ func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnosti
 			continue
 		}
 		diag.RawLines = append(diag.RawLines, line)
-		a.debugf("auth diagnostic %s: response line=%q", name, line)
+		a.debug("auth diagnostic response line", "port", name, "line", line)
 		fields := strings.Fields(stripBeforeKnownDiagnostic(line))
 		if len(fields) < 2 {
 			continue
@@ -409,7 +413,7 @@ func (a Authenticator) diagnosePort(ctx context.Context, name string) (Diagnosti
 }
 
 func (a Authenticator) readTimerStatusPort(ctx context.Context, name string) (TimerStatus, error) {
-	a.debugf("timer %s: configuring tty baud=%d timeout=%s", name, a.Cfg.Baud, a.Cfg.Timeout)
+	a.debug("serial tty configure", "operation", "timer_status", "port", name, "baud", a.Cfg.Baud, "timeout", a.Cfg.Timeout)
 	if err := configureTTY(ctx, name, a.Cfg.Baud); err != nil {
 		return TimerStatus{}, err
 	}
@@ -425,7 +429,7 @@ func (a Authenticator) readTimerStatusPort(ctx context.Context, name string) (Ti
 	if err := writeAll(ctx, f, query, a.Cfg.Timeout); err != nil {
 		return TimerStatus{}, fmt.Errorf("write timer status to %s: %w", name, err)
 	}
-	a.debugf("timer %s: status query written bytes=%q", name, string(query))
+	a.debug("timer status query written", "port", name, "bytes", string(query))
 
 	deadline := time.Now().Add(a.Cfg.Timeout)
 	for {
@@ -441,7 +445,7 @@ func (a Authenticator) readTimerStatusPort(ctx context.Context, name string) (Ti
 			return TimerStatus{}, fmt.Errorf("read timer status from %s: %w", name, err)
 		}
 		response = strings.TrimSpace(response)
-		a.debugf("timer %s: status response line=%q", name, response)
+		a.debug("timer status response line", "port", name, "line", response)
 		if a.handleAsyncLine(name, response) {
 			continue
 		}
@@ -457,7 +461,7 @@ func (a Authenticator) readTimerStatusPort(ctx context.Context, name string) (Ti
 }
 
 func (a Authenticator) sendTimerCommandPort(ctx context.Context, name string, commandParts ...string) (TimerStatus, error) {
-	a.debugf("timer %s: configuring tty baud=%d timeout=%s", name, a.Cfg.Baud, a.Cfg.Timeout)
+	a.debug("serial tty configure", "operation", "timer_command", "port", name, "baud", a.Cfg.Baud, "timeout", a.Cfg.Timeout)
 	if err := configureTTY(ctx, name, a.Cfg.Baud); err != nil {
 		return TimerStatus{}, err
 	}
@@ -475,7 +479,7 @@ func (a Authenticator) sendTimerCommandPort(ctx context.Context, name string, co
 	if err := writeAll(ctx, f, []byte(line), a.Cfg.Timeout); err != nil {
 		return TimerStatus{}, fmt.Errorf("write timer command to %s: %w", name, err)
 	}
-	a.debugf("timer %s: command written bytes=%q", name, line)
+	a.debug("timer command written", "port", name, "bytes", line)
 
 	deadline := time.Now().Add(a.Cfg.Timeout)
 	var rejection string
@@ -492,7 +496,7 @@ func (a Authenticator) sendTimerCommandPort(ctx context.Context, name string, co
 			return TimerStatus{}, fmt.Errorf("read timer command response from %s: %w", name, err)
 		}
 		response = strings.TrimSpace(response)
-		a.debugf("timer %s: response line=%q", name, response)
+		a.debug("timer command response line", "port", name, "line", response)
 		if a.handleAsyncLine(name, response) {
 			continue
 		}
@@ -511,9 +515,9 @@ func (a Authenticator) sendTimerCommandPort(ctx context.Context, name string, co
 	return TimerStatus{}, fmt.Errorf("no timer command acknowledgement from %s", name)
 }
 
-func (a Authenticator) debugf(format string, args ...any) {
+func (a Authenticator) debug(msg string, attrs ...any) {
 	if a.Cfg.Debug {
-		log.Printf(format, args...)
+		slog.Debug(msg, attrs...)
 	}
 }
 
@@ -522,7 +526,7 @@ func (a Authenticator) handleAsyncLine(port string, line string) bool {
 	if !ok {
 		return false
 	}
-	a.debugf("timer %s: warning line=%q", port, line)
+	a.debug("timer warning line received", "port", port, "line", line)
 	if a.TimerWarningHandler != nil {
 		a.TimerWarningHandler(warning)
 	}
