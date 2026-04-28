@@ -1,0 +1,21 @@
+[Unit]
+Description=KDE serial-token screen lock guard
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/keylock -config %h/.config/keylock/config.json
+EnvironmentFile=%h/.config/keylock/secret.env
+Restart=always
+RestartSec=2
+
+# Conservative hardening. Device access is still needed for /dev/ttyACM* or /dev/ttyUSB*.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/keylock
+
+[Install]
+WantedBy=default.target

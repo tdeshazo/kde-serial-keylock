@@ -1,0 +1,19 @@
+{
+  "serial": {
+    "port": "",
+    "baud": 115200,
+    "vid": "",
+    "pid": "",
+    "poll_interval_ms": 1000,
+    "challenge_timeout_ms": 1500
+  },
+  "auth": {
+    "secret_env": "KEYLOCK_SECRET"
+  },
+  "locker": {
+    "backend": "kde-logind",
+    "relock_interval_ms": 2000,
+    "unlock_when_authenticated": true,
+    "dry_run": true
+  }
+}
