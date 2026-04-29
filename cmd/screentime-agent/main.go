@@ -93,12 +93,13 @@ func run(ctx context.Context, client screentime.Client, l locker.Locker, deviceI
 			continue
 		}
 		lastCoordinatorOK = time.Now()
-		lockRequested = false
 
 		slog.Debug("coordinator policy received", "user", status.UserID, "state", status.State, "remaining_seconds", status.RemainingSeconds, "should_lock", status.ShouldLock, "active_devices", status.ActiveDevices)
 		if status.ShouldLock {
 			requestLock(ctx, l, timeout, dryRun, "allowance expired", &lockRequested)
+			continue
 		}
+		lockRequested = false
 	}
 }
 
