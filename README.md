@@ -4,6 +4,10 @@ A small Linux/KDE user-session daemon scaffold written in Go. It locks the curre
 
 This is a scaffold, not a hardened security product. Treat it as a convenience layer on top of the normal KDE/systemd screen lock, not as a replacement for OS authentication, disk encryption, or physical security.
 
+## Screen time MVP
+
+An additive screen-time management MVP is available in [`docs/screen-time-mvp.md`](docs/screen-time-mvp.md). It adds a coordinator, local KDE/Linux agent, and admin CLI for managing user time allowance across devices. The serial token tools remain available and unchanged.
+
 ## Protocol
 
 The host sends a fresh random challenge:
