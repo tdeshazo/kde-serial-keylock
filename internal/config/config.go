@@ -68,7 +68,7 @@ func Default() Config {
 		},
 		HID: HIDConfig{
 			ReportID:   1,
-			ReportSize: 64,
+			ReportSize: 128,
 		},
 		Auth: AuthConfig{SecretEnv: "KEYLOCK_SECRET"},
 		Locker: LockerConfig{
@@ -113,7 +113,7 @@ func (c *Config) applyDefaults() {
 		c.HID.ReportID = 1
 	}
 	if c.HID.ReportSize == 0 {
-		c.HID.ReportSize = 64
+		c.HID.ReportSize = 128
 	}
 	if c.Auth.SecretEnv == "" {
 		c.Auth.SecretEnv = "KEYLOCK_SECRET"
