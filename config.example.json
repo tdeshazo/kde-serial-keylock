@@ -1,4 +1,5 @@
 {
+  "transport": "serial",
   "serial": {
     "port": "",
     "baud": 115200,
@@ -6,6 +7,13 @@
     "pid": "",
     "poll_interval_ms": 1000,
     "challenge_timeout_ms": 1500
+  },
+  "hid": {
+    "path": "",
+    "vid": "",
+    "pid": "",
+    "report_id": 1,
+    "report_size": 128
   },
   "auth": {
     "secret_env": "KEYLOCK_SECRET"
