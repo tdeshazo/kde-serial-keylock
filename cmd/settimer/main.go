@@ -20,7 +20,7 @@ import (
 func main() {
 	var (
 		configPath = flag.String("config", "config.json", "path to JSON config")
-		debug      = flag.Bool("debug", false, "log serial timer diagnostics")
+		debug      = flag.Bool("debug", false, "log timer diagnostics")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage:\n")
@@ -67,12 +67,18 @@ func main() {
 
 	auth := token.Authenticator{
 		Cfg: token.Config{
-			Port:    cfg.Serial.Port,
-			Baud:    cfg.Serial.Baud,
-			VID:     cfg.Serial.VID,
-			PID:     cfg.Serial.PID,
-			Timeout: cfg.ChallengeTimeout(),
-			Debug:   *debug,
+			Transport:     cfg.Transport,
+			Port:          cfg.Serial.Port,
+			Baud:          cfg.Serial.Baud,
+			VID:           cfg.Serial.VID,
+			PID:           cfg.Serial.PID,
+			HIDPath:       cfg.HID.Path,
+			HIDVID:        cfg.HID.VID,
+			HIDPID:        cfg.HID.PID,
+			HIDReportID:   cfg.HID.ReportID,
+			HIDReportSize: cfg.HID.ReportSize,
+			Timeout:       cfg.ChallengeTimeout(),
+			Debug:         *debug,
 		},
 		Secret: secret,
 	}
@@ -151,7 +157,9 @@ func formatSeconds(seconds int) string {
 func isNoKeyError(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "no matching serial ports") ||
-		strings.Contains(text, "no serial ports attempted")
+		strings.Contains(text, "no serial ports attempted") ||
+		strings.Contains(text, "no matching HID devices") ||
+		strings.Contains(text, "no HID devices attempted")
 }
 
 func failUsage(format string, args ...any) {
