@@ -8,9 +8,13 @@ import (
 )
 
 type Config struct {
-	Serial SerialConfig `json:"serial"`
-	Auth   AuthConfig   `json:"auth"`
-	Locker LockerConfig `json:"locker"`
+	// Transport selects how the host talks to the token. Empty defaults to serial
+	// for backward compatibility with existing config files.
+	Transport string       `json:"transport"`
+	Serial    SerialConfig `json:"serial"`
+	HID       HIDConfig    `json:"hid"`
+	Auth      AuthConfig   `json:"auth"`
+	Locker    LockerConfig `json:"locker"`
 }
 
 type SerialConfig struct {
@@ -23,6 +27,18 @@ type SerialConfig struct {
 	PID                string `json:"pid"`
 	PollIntervalMS     int    `json:"poll_interval_ms"`
 	ChallengeTimeoutMS int    `json:"challenge_timeout_ms"`
+}
+
+type HIDConfig struct {
+	// Path is optional. If empty, keylock scans /dev/hidraw* devices.
+	Path string `json:"path"`
+	// VID and PID are optional USB filters, expressed as lowercase or uppercase hex strings,
+	// for example "239a" and "80f4". Leave blank to accept any HID device that answers.
+	VID string `json:"vid"`
+	PID string `json:"pid"`
+	// ReportID and ReportSize must match the vendor HID descriptor in firmware/hid/boot.py.
+	ReportID   int `json:"report_id"`
+	ReportSize int `json:"report_size"`
 }
 
 type AuthConfig struct {
@@ -44,10 +60,15 @@ type LockerConfig struct {
 
 func Default() Config {
 	return Config{
+		Transport: "serial",
 		Serial: SerialConfig{
 			Baud:               115200,
 			PollIntervalMS:     1000,
 			ChallengeTimeoutMS: 1500,
+		},
+		HID: HIDConfig{
+			ReportID:   1,
+			ReportSize: 64,
 		},
 		Auth: AuthConfig{SecretEnv: "KEYLOCK_SECRET"},
 		Locker: LockerConfig{
@@ -76,6 +97,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Transport == "" {
+		c.Transport = "serial"
+	}
 	if c.Serial.Baud == 0 {
 		c.Serial.Baud = 115200
 	}
@@ -84,6 +108,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Serial.ChallengeTimeoutMS == 0 {
 		c.Serial.ChallengeTimeoutMS = 1500
+	}
+	if c.HID.ReportID == 0 {
+		c.HID.ReportID = 1
+	}
+	if c.HID.ReportSize == 0 {
+		c.HID.ReportSize = 64
 	}
 	if c.Auth.SecretEnv == "" {
 		c.Auth.SecretEnv = "KEYLOCK_SECRET"
