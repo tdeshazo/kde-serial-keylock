@@ -36,12 +36,18 @@ const (
 var errTimeout = errors.New("timeout")
 
 type Config struct {
-	Port    string
-	Baud    int
-	VID     string
-	PID     string
-	Timeout time.Duration
-	Debug   bool
+	Transport     string
+	Port          string
+	Baud          int
+	VID           string
+	PID           string
+	HIDPath       string
+	HIDVID        string
+	HIDPID        string
+	HIDReportID   int
+	HIDReportSize int
+	Timeout       time.Duration
+	Debug         bool
 }
 
 type Authenticator struct {
@@ -117,6 +123,9 @@ func (a Authenticator) Authenticate(ctx context.Context) (string, error) {
 	if len(a.Secret) == 0 {
 		return "", errors.New("empty secret")
 	}
+	if a.transport() == "hid" {
+		return a.authenticateHID(ctx)
+	}
 	ports, err := a.candidatePorts()
 	if err != nil {
 		return "", err
@@ -148,6 +157,9 @@ func (a Authenticator) Authenticate(ctx context.Context) (string, error) {
 func (a Authenticator) Diagnose(ctx context.Context) (Diagnostic, error) {
 	if len(a.Secret) == 0 {
 		return Diagnostic{}, errors.New("empty secret")
+	}
+	if a.transport() == "hid" {
+		return a.diagnoseHID(ctx)
 	}
 	ports, err := a.candidatePorts()
 	if err != nil {
@@ -192,6 +204,9 @@ func (a Authenticator) PauseTimer(ctx context.Context) (TimerStatus, error) {
 }
 
 func (a Authenticator) TimerStatus(ctx context.Context) (TimerStatus, error) {
+	if a.transport() == "hid" {
+		return a.timerStatusHID(ctx)
+	}
 	ports, err := a.candidatePorts()
 	if err != nil {
 		return TimerStatus{}, err
@@ -236,6 +251,9 @@ func (a Authenticator) AddTimer(ctx context.Context, seconds int) (TimerStatus, 
 }
 
 func (a Authenticator) sendTimerCommand(ctx context.Context, commandParts ...string) (TimerStatus, error) {
+	if a.transport() == "hid" {
+		return a.sendTimerCommandHID(ctx, commandParts...)
+	}
 	ports, err := a.candidatePorts()
 	if err != nil {
 		return TimerStatus{}, err
@@ -257,6 +275,13 @@ func (a Authenticator) sendTimerCommand(ctx context.Context, commandParts ...str
 		lastErr = errors.New("no serial ports attempted")
 	}
 	return TimerStatus{}, lastErr
+}
+
+func (a Authenticator) transport() string {
+	if a.Cfg.Transport == "" {
+		return "serial"
+	}
+	return strings.ToLower(a.Cfg.Transport)
 }
 
 func (a Authenticator) candidatePorts() ([]string, error) {
