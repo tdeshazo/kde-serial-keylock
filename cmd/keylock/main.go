@@ -23,8 +23,9 @@ func main() {
 	var (
 		configPath = flag.String("config", "config.json", "path to JSON config")
 		listPorts  = flag.Bool("list-ports", false, "list detected serial ports and exit")
+		listHID    = flag.Bool("list-hid", false, "list detected hidraw devices and exit")
 		once       = flag.Bool("once", false, "check once: unlock if token authenticates, otherwise lock")
-		authDebug  = flag.Bool("auth-debug", false, "log serial challenge/response diagnostics")
+		authDebug  = flag.Bool("auth-debug", false, "log token challenge/response diagnostics")
 		tokenDiag  = flag.Bool("token-diag", false, "ask token to report key hash and HMAC test vector")
 	)
 	flag.Parse()
@@ -32,25 +33,11 @@ func main() {
 	configureLogging(*authDebug)
 
 	if *listPorts {
-		ports, err := token.ListPorts()
-		if err != nil {
-			exitError(1, "list serial ports failed", "err", err)
-		}
-		if len(ports) == 0 {
-			fmt.Println("no /dev/ttyACM*, /dev/ttyUSB*, or /dev/serial/by-id/* ports found")
-			return
-		}
-		for _, p := range ports {
-			if p.Symlink != "" {
-				fmt.Printf("%s -> %s", p.Symlink, p.Name)
-			} else {
-				fmt.Print(p.Name)
-			}
-			if p.VID != "" || p.PID != "" {
-				fmt.Printf(" vid=%s pid=%s", p.VID, p.PID)
-			}
-			fmt.Println()
-		}
+		listSerialPorts()
+		return
+	}
+	if *listHID {
+		listHIDDevices()
 		return
 	}
 
@@ -73,19 +60,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	auth := token.Authenticator{
-		Cfg: token.Config{
-			Port:    cfg.Serial.Port,
-			Baud:    cfg.Serial.Baud,
-			VID:     cfg.Serial.VID,
-			PID:     cfg.Serial.PID,
-			Timeout: cfg.ChallengeTimeout(),
-			Debug:   *authDebug,
-		},
-		Secret: []byte(secret),
-		TimerWarningHandler: func(warning token.TimerWarning) {
-			go notifyTimerWarning(ctx, warning)
-		},
+	auth := newAuthenticator(cfg, []byte(secret), *authDebug)
+	auth.TimerWarningHandler = func(warning token.TimerWarning) {
+		go notifyTimerWarning(ctx, warning)
 	}
 	if *authDebug {
 		slog.Warn("auth debug enabled", "sensitive", true, "detail", "challenge nonces and per-challenge HMACs will be logged")
@@ -102,6 +79,69 @@ func main() {
 	}
 
 	runDaemon(ctx, auth, l, cfg)
+}
+
+func newAuthenticator(cfg config.Config, secret []byte, debug bool) token.Authenticator {
+	return token.Authenticator{
+		Cfg: token.Config{
+			Transport:     cfg.Transport,
+			Port:          cfg.Serial.Port,
+			Baud:          cfg.Serial.Baud,
+			VID:           cfg.Serial.VID,
+			PID:           cfg.Serial.PID,
+			HIDPath:       cfg.HID.Path,
+			HIDVID:        cfg.HID.VID,
+			HIDPID:        cfg.HID.PID,
+			HIDReportID:   cfg.HID.ReportID,
+			HIDReportSize: cfg.HID.ReportSize,
+			Timeout:       cfg.ChallengeTimeout(),
+			Debug:         debug,
+		},
+		Secret: secret,
+	}
+}
+
+func listSerialPorts() {
+	ports, err := token.ListPorts()
+	if err != nil {
+		exitError(1, "list serial ports failed", "err", err)
+	}
+	if len(ports) == 0 {
+		fmt.Println("no /dev/ttyACM*, /dev/ttyUSB*, or /dev/serial/by-id/* ports found")
+		return
+	}
+	for _, p := range ports {
+		if p.Symlink != "" {
+			fmt.Printf("%s -> %s", p.Symlink, p.Name)
+		} else {
+			fmt.Print(p.Name)
+		}
+		if p.VID != "" || p.PID != "" {
+			fmt.Printf(" vid=%s pid=%s", p.VID, p.PID)
+		}
+		fmt.Println()
+	}
+}
+
+func listHIDDevices() {
+	devices, err := token.ListHIDDevices()
+	if err != nil {
+		exitError(1, "list HID devices failed", "err", err)
+	}
+	if len(devices) == 0 {
+		fmt.Println("no /dev/hidraw* devices found")
+		return
+	}
+	for _, d := range devices {
+		fmt.Print(d.Path)
+		if d.VID != "" || d.PID != "" {
+			fmt.Printf(" vid=%s pid=%s", d.VID, d.PID)
+		}
+		if d.Name != "" {
+			fmt.Printf(" name=%q", d.Name)
+		}
+		fmt.Println()
+	}
 }
 
 func configureLogging(debug bool) {
@@ -214,6 +254,7 @@ func runDaemon(ctx context.Context, auth token.Authenticator, l locker.Locker, c
 		"keylock started",
 		"backend", cfg.Locker.Backend,
 		"dry_run", cfg.Locker.DryRun,
+		"transport", cfg.Transport,
 		"poll_interval", cfg.PollInterval(),
 		"relock_interval", cfg.RelockInterval(),
 		"unlock_when_authenticated", cfg.Locker.UnlockWhenAuthenticated,
