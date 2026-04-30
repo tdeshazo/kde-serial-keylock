@@ -1,6 +1,6 @@
 # kde-serial-keylock
 
-A small Linux/KDE user-session daemon scaffold written in Go. It locks the current session whenever a trusted serial token is absent or fails authentication, and requests unlock when the token proves it knows a shared secret.
+A small Linux/KDE user-session daemon scaffold written in Go. It locks the current session whenever a trusted serial or HID token is absent or fails authentication, and requests unlock when the token proves it knows a shared secret.
 
 This is a scaffold, not a hardened security product. Treat it as a convenience layer on top of the normal KDE/systemd screen lock, not as a replacement for OS authentication, disk encryption, or physical security.
 
@@ -18,11 +18,13 @@ The token responds:
 HMAC-SHA256 <hex(hmac_sha256(secret, nonce_hex))>
 ```
 
-The secret is never sent over the serial line.
+The secret is never sent over the transport.
+
+Serial firmware sends these as newline-terminated text over USB CDC serial. The optional HID firmware carries the same text lines inside vendor-defined 128-byte HID reports so the host and firmware can share the same protocol semantics while using `/dev/hidraw*` instead of `/dev/ttyACM*` or `/dev/ttyUSB*`.
 
 ## Token timer protocol
 
-The firmware also accepts timer commands over the same serial port. Time-limit
+The firmware also accepts timer commands over the selected token transport. Time-limit
 setup is intended to be sent by a separate provisioning tool. While running, the
 keylock daemon sends the `LOCKED` and `UNLOCKED` events when the desktop lock
 state changes.
@@ -62,9 +64,9 @@ Mutating timer commands are authenticated. `<hmac>` is:
 hex(hmac_sha256(secret, "<command without trailing hmac>"))
 ```
 
-This keeps unauthenticated serial writers from changing timer state. It does not
+This keeps unauthenticated transport writers from changing timer state. It does not
 make provisioning commands replay-proof: someone who can capture a valid `SET`
-or `CLEAR` command on the serial link can replay it later. Treat the serial path
+or `CLEAR` command on the transport can replay it later. Treat the path
 used for provisioning as trusted, or add a separate challenge/nonce flow before
 using this across an untrusted transport.
 
@@ -74,7 +76,7 @@ For example, for:
 KEYLOCK-TIMER/1 SET 3600
 ```
 
-the final serial line must be:
+the final transport line must be:
 
 ```text
 KEYLOCK-TIMER/1 SET 3600 <hex(hmac_sha256(secret, "KEYLOCK-TIMER/1 SET 3600"))>
@@ -96,7 +98,7 @@ When a running timer crosses the 5-minute threshold, the token writes:
 KEYLOCK-WARNING/1 remaining=300
 ```
 
-The daemon treats this as an asynchronous serial event and shows a desktop
+The daemon treats this as an asynchronous token event and shows a desktop
 notification with `notify-send`:
 
 ```bash
@@ -127,15 +129,58 @@ also sends `PAUSE` during daemon shutdown. A provisioned key therefore does not
 count down merely because it is powered; time elapses only after the daemon sends
 `UNLOCKED` or another authenticated `RESUME`.
 
+## Optional HID transport
+
+Serial remains the default and the existing `firmware/code.py` serial firmware is unchanged. The HID implementation is opt-in:
+
+- Host-side HID is implemented for Linux hidraw devices under `/dev/hidraw*`.
+- HID uses the same line protocol as serial, framed inside 128-byte vendor HID reports.
+- The alternate CircuitPython HID firmware lives under `firmware/hid/`.
+- `firmware/hid/boot.py` must be copied to `CIRCUITPY/boot.py` because CircuitPython USB HID devices are configured before `code.py` starts.
+- `firmware/hid/code.py` must be copied to `CIRCUITPY/code.py` for HID token behavior.
+
+HID report payloads exclude the report ID byte and use this simple frame:
+
+```text
+byte 0      ASCII payload length, 0-126
+bytes 1..n  ASCII protocol line
+remaining   zero padding
+```
+
+The default report ID is `1`, the host report size is `128`, and the firmware HID report payload size is `127`.
+
+List candidate HID devices:
+
+```bash
+./keylock -list-hid
+```
+
+To try HID, keep `dry_run: true`, set `transport` to `hid`, and either set `hid.path` to the chosen `/dev/hidrawN` path or filter by `hid.vid` and `hid.pid`:
+
+```json
+{
+  "transport": "hid",
+  "hid": {
+    "path": "/dev/hidrawN",
+    "vid": "",
+    "pid": "",
+    "report_id": 1,
+    "report_size": 128
+  }
+}
+```
+
+Linux HID access normally requires a udev rule or equivalent permissions for the chosen `/dev/hidraw*` node. Do not run the daemon as root just to bypass device permissions.
+
 ## Requirements
 
 - Linux with KDE Plasma.
 - `go` for building.
-- `stty` for serial-port configuration.
+- `stty` for serial-port configuration when using the serial transport.
 - `qdbus6`, `qdbus`, or `dbus-send` for KDE locking.
 - `loginctl` for logind lock/unlock requests.
 - `notify-send` for timer warning desktop notifications.
-- Permission to read/write the serial device. On many distros this means adding your user to `dialout`, `uucp`, or a distro-specific serial group, then logging out and back in.
+- Permission to read/write the selected token device. Serial devices commonly require membership in `dialout`, `uucp`, or a distro-specific serial group. HID devices commonly require a udev rule granting access to the selected `/dev/hidraw*` node.
 
 ## Build
 
@@ -153,7 +198,7 @@ mkdir -p ~/.config/keylock
 cp config.example.json ~/.config/keylock/config.json
 ```
 
-Start with `dry_run: true`. Once the serial protocol works, change it to `false`.
+Start with `dry_run: true`. Once the token protocol works, change it to `false`.
 
 Put the shared secret in an environment file:
 
@@ -176,6 +221,12 @@ List candidate serial devices:
 
 ```bash
 ./keylock -list-ports
+```
+
+List candidate HID devices:
+
+```bash
+./keylock -list-hid
 ```
 
 Read the timer state from a present key:
@@ -220,7 +271,7 @@ set +a
 ./keylock -config ~/.config/keylock/config.json -once -auth-debug
 ```
 
-This logs the candidate serial ports, the challenge nonce, the token response,
+This logs the candidate token devices, the challenge nonce, the token response,
 the expected HMAC over the ASCII nonce, and the HMAC that would be expected if a
 token mistakenly used the raw nonce bytes. Treat these logs as sensitive
 diagnostics because they include per-challenge HMAC values.
@@ -275,7 +326,7 @@ Install `socat`, create two pseudo-terminals, and point the app at one while the
 socat -d -d pty,raw,echo=0 pty,raw,echo=0
 ```
 
-In `config.json`, set `serial.port` to one reported pty. Then run:
+In `config.json`, set `transport` to `serial` and `serial.port` to one reported pty. Then run:
 
 ```bash
 KEYLOCK_SECRET=replace-this-with-a-long-random-secret ./tools/token_sim.py --debug /dev/pts/N
@@ -283,10 +334,13 @@ KEYLOCK_SECRET=replace-this-with-a-long-random-secret ./tools/token_sim.py --deb
 
 Run keylock against the other pty.
 
+The simulator currently covers the serial transport only. HID testing requires CircuitPython hardware running the alternate files under `firmware/hid/`.
+
 ## Important limitations
 
 - KDE exposes a public lock API, but not a reliable “unlock without credentials” API on the same surface. This scaffold requests unlock through `loginctl unlock-session`. Whether that actually unlocks the graphical locker depends on your desktop/session policy.
 - If unlock is ignored, the app will still stop re-locking once the token authenticates; you can then type your normal password.
 - Anyone with the token and secret can request an unlock. Protect the token firmware and secret.
+- HID changes the device class and framing, but the HMAC challenge/response remains the trust boundary. VID/PID, HID usage, and `/dev/hidraw*` paths are not security boundaries.
 - The diagnostic modes intentionally disclose secret verifiers for troubleshooting. Keep them disabled during normal operation.
 - If the daemon is killed, it stops enforcing the token policy. For stronger behavior, pair it with systemd restart policies and regular OS lock settings.
